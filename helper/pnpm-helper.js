@@ -21,6 +21,7 @@ const wrapAnsi256 = (fn, offset) => (...args) => {
 const wrapAnsi16m = (fn, offset) => (...args) => {
 	const rgb = fn(...args);
 	return `\u001B[${38 + offset};2;${rgb[0]};${rgb[1]};${rgb[2]}m`;
+	/* adding extra space here */
 };
 
 const ansi2ansi = n => n;

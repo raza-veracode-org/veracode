@@ -66,6 +66,12 @@ veracode_sca_scan:
     commands:
       - "Veracode SCA Scan"
 
+fix_for_sca:
+    # Fix for SCA configuration
+    pull_request:
+      # Setting trigger to true will enable Fix for SCA on pull requests. Fix for SCA requires SCA scans to be executed on these pull requests.
+      trigger: true
+
 veracode_iac_secrets_scan:
   push:
     trigger: true
