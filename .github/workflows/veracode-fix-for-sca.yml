@@ -6,14 +6,86 @@ on:
   repository_dispatch:
     types:
       - veracode-fix-for-sca
+  pull_request:
+    types:
+      - opened
+      - synchronize
+    branches:
+      - main
 
 jobs:
+  check-sca-artifacts:
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-id: ${{ steps.find-artifact.outputs.artifact-id }}
+      artifact-run-id: ${{ steps.find-artifact.outputs.artifact-run-id }}
+      has-artifact: ${{ steps.find-artifact.outputs.has-artifact }}
+    steps:
+      - name: Find SCA scan artifacts with retries
+        id: find-artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Look for SCA artifacts from the current PR with retries (for PR events)
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            MAX_RETRIES=30
+            RETRY_COUNT=0
+            ARTIFACT_ID=""
+            RUN_ID=""
+
+            while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+              echo "Attempt $((RETRY_COUNT + 1))/$MAX_RETRIES: Looking for SCA scan artifacts..."
+
+              # Find the most recent successful SCA workflow run for this repository
+              RUN_ID=$(gh api repos/${{ github.repository }}/actions/runs \
+                --method GET \
+                -f head_sha=${{ github.event.pull_request.head.sha }} \
+                -q ".workflow_runs[] | select(.name | contains(\"Software Composition Analysis\") and .status == \"completed\") | .id" | head -1)
+
+              if [ ! -z "$RUN_ID" ]; then
+                echo "Found SCA run: $RUN_ID"
+
+                # Now get the artifact ID from that run
+                ARTIFACT_ID=$(gh api repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts \
+                  -q ".artifacts[] | select(.expired == false) | .id" | head -1)
+
+                if [ ! -z "$ARTIFACT_ID" ]; then
+                  echo "Found SCA artifact: $ARTIFACT_ID"
+                  break
+                else
+                  echo "Run found but no unexpired artifacts available yet"
+                fi
+              fi
+
+              RETRY_COUNT=$((RETRY_COUNT + 1))
+              if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                echo "No artifacts found yet. Waiting 10 seconds before retry..."
+                sleep 10
+              fi
+            done
+
+            if [ -z "$ARTIFACT_ID" ] || [ -z "$RUN_ID" ]; then
+              echo "has-artifact=false" >> $GITHUB_OUTPUT
+              echo "ERROR: Could not find SCA artifacts after $MAX_RETRIES attempts"
+              exit 1
+            else
+              echo "artifact-id=$ARTIFACT_ID" >> $GITHUB_OUTPUT
+              echo "artifact-run-id=$RUN_ID" >> $GITHUB_OUTPUT
+              echo "has-artifact=true" >> $GITHUB_OUTPUT
+            fi
+          else
+            # For repository_dispatch, artifacts should be provided in client_payload
+            echo "has-artifact=true" >> $GITHUB_OUTPUT
+          fi
+
   cleanup:
+    if: github.event_name == 'repository_dispatch'
     uses: ./.github/workflows/veracode-clean-up.yml
     with:
       runs_on: ${{ github.event.client_payload.user_config.default_runs_on }}
 
   create_metadata:
+    if: github.event_name == 'repository_dispatch'
     needs: cleanup
     uses: ./.github/workflows/veracode-metadata.yml
     with:
@@ -25,19 +97,29 @@ jobs:
       head_sha: ${{ github.event.client_payload.sha }}
 
   fix-for-sca-action:
-    needs: create_metadata
-    runs-on: ${{ fromJSON(github.event.client_payload.user_config.default_runs_on) }}
+    needs: [check-sca-artifacts]
+    runs-on: ${{ github.event_name == 'repository_dispatch' && fromJSON(github.event.client_payload.user_config.default_runs_on) || 'ubuntu-latest' }}
+    if: github.event_name == 'repository_dispatch' || needs.check-sca-artifacts.outputs.has-artifact == 'true'
     steps:
-    - name: Download SCA scan artifact
-      uses: actions/download-artifact@v4
+    - name: Download SCA scan artifact (repository_dispatch)
+      if: github.event_name == 'repository_dispatch'
+      uses: actions/download-artifact@v7
       with:
         github-token: ${{ github.event.client_payload.token }}
         run-id: ${{ github.event.client_payload.workflow_run_id }}
         artifact-ids: ${{ github.event.client_payload.artifact_id }}
         path: ./veracode_artifact_directory
 
+    - name: Download SCA scan artifact (pull_request)
+      if: github.event_name == 'pull_request'
+      uses: actions/download-artifact@v7
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        run-id: ${{ needs.check-sca-artifacts.outputs.artifact-run-id }}
+        path: ./veracode_artifact_directory
+
     - name: Check out to get veracode CLI
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       with:
         path: 'veracode-helper'
         fetch-depth: 0
@@ -76,11 +158,11 @@ jobs:
         git config --global core.eol lf
         git config --global core.autocrlf false
 
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
       with:
-        repository: ${{ github.event.client_payload.repository.full_name }}
-        ref: ${{ github.event.client_payload.repository.branch }}
-        token: ${{ github.event.client_payload.token }}
+        repository: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.repository.full_name || github.repository }}
+        ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.repository.branch || github.head_ref }}
+        token: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.token || secrets.GITHUB_TOKEN }}
         path: 'source-code'
 
     - id: run-fix-sca
@@ -90,11 +172,37 @@ jobs:
         VERACODE_API_KEY_SECRET: '${{ secrets.VERACODE_API_KEY }}'
         CLI_PATH: ${{ runner.os == 'Windows' && steps.cli-setup-windows.outputs.cli-path || steps.cli-setup-unix.outputs.cli-path }}
       with:
-        github-token: ${{ github.event.client_payload.token }}
-        pr-number: ${{ github.event.client_payload.issue_number }} 
-        sca-scan-run-id: ${{ github.event.client_payload.workflow_run_id }} 
-        sca-scan-artifact-id: ${{ github.event.client_payload.artifact_id }} 
-        repository: ${{ github.event.client_payload.repository.full_name }}
-        branch: ${{ github.event.client_payload.repository.branch }} 
-        fix-sca-params: ${{ github.event.client_payload.fix_sca_params }} 
-        github-api-url: ${{ github.api_url }} 
+        github-token: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.token || secrets.GITHUB_TOKEN }}
+        pr-number: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.issue_number || github.event.pull_request.number }}
+        sca-scan-run-id: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.workflow_run_id || needs.check-sca-artifacts.outputs.artifact-run-id }}
+        sca-scan-artifact-id: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.artifact_id || needs.check-sca-artifacts.outputs.artifact-id }}
+        repository: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.repository.full_name || github.repository }}
+        branch: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.repository.branch || github.head_ref }}
+        fix-sca-params: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.fix_sca_params || '' }}
+        github-api-url: ${{ github.api_url }}
+
+    - name: Download PR comment artifact
+      if: steps.run-fix-sca.outputs.create-pr-run-next-step == 'true'
+      uses: actions/download-artifact@v4
+      with:
+        name: veracode-cli-pr-comment-json
+        path: ./pr-comment-artifact
+
+    - name: Post comment to original PR
+      if: steps.run-fix-sca.outputs.create-pr-run-next-step == 'true'
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.token || secrets.GITHUB_TOKEN }}
+        script: |
+          const fs = require('fs');
+          const path = require('path');
+          const data = JSON.parse(fs.readFileSync(path.join('./pr-comment-artifact', 'veracode-cli.pr-comment.json'), 'utf8'));
+
+          await github.rest.issues.createComment({
+            owner: data.repository_owner,
+            repo: data.repository_name,
+            issue_number: data.issue_number,
+            body: data.body
+          });
+
+          core.info(`Comment posted to PR #${data.issue_number}`); 
