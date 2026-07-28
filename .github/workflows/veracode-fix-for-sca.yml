@@ -39,7 +39,7 @@ jobs:
               # Find the most recent successful SCA workflow run for this repository
               RUN_ID=$(gh api repos/${{ github.repository }}/actions/runs \
                 --method GET \
-                -f head_sha=${{ github.event.pull_request.head.sha }} \
+                -f head_sha='${{ github.event.pull_request.head.sha }}' \
                 -q ".workflow_runs[] | select(.name | contains(\"Software Composition Analysis\") and .status == \"completed\") | .id" | head -1)
 
               if [ ! -z "$RUN_ID" ]; then
@@ -103,23 +103,23 @@ jobs:
     steps:
     - name: Download SCA scan artifact (repository_dispatch)
       if: github.event_name == 'repository_dispatch'
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@v4
       with:
         github-token: ${{ github.event.client_payload.token }}
         run-id: ${{ github.event.client_payload.workflow_run_id }}
-        artifact-ids: ${{ github.event.client_payload.artifact_id }}
+        name: ${{ github.event.client_payload.artifact_id }}
         path: ./veracode_artifact_directory
 
     - name: Download SCA scan artifact (pull_request)
       if: github.event_name == 'pull_request'
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@v4
       with:
         github-token: ${{ secrets.GITHUB_TOKEN }}
         run-id: ${{ needs.check-sca-artifacts.outputs.artifact-run-id }}
         path: ./veracode_artifact_directory
 
     - name: Check out to get veracode CLI
-      uses: actions/checkout@v6
+      uses: actions/checkout@v4
       with:
         path: 'veracode-helper'
         fetch-depth: 0
@@ -158,7 +158,7 @@ jobs:
         git config --global core.eol lf
         git config --global core.autocrlf false
 
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v4
       with:
         repository: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.repository.full_name || github.repository }}
         ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.repository.branch || github.head_ref }}

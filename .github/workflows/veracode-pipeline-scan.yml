@@ -76,9 +76,14 @@ jobs:
       - name: Get list of files for matrix
         id: get-files
         run: |
+          if [ ! -d "veracode_artifact_directory" ] || [ -z "$(ls -A veracode_artifact_directory)" ]; then
+            echo "WARNING: No artifacts found in veracode_artifact_directory"
+            echo "matrix_files=[]" >> $GITHUB_OUTPUT
+            exit 0
+          fi
           files=$(ls -1 veracode_artifact_directory | jq -R . | jq -s .)
           echo "Files for matrix: $files"
-          files=$(echo $files | jq -c .)  # Compact the JSON array to a single line
+          files=$(echo $files | jq -c .)
           echo "matrix_files=$files" >> $GITHUB_OUTPUT
         shell: bash
 
