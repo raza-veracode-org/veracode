@@ -109,8 +109,27 @@ jobs:
         echo "workflow_run_id: ${{ github.event.client_payload.workflow_run_id }}"
         echo "artifact_id (raw): ${{ github.event.client_payload.artifact_id }}"
         echo "artifact_id (valid): ${{ steps.check-artifact-id.outputs.valid }}"
+        echo ""
+        echo "Checking for SCA results files..."
+        find ./veracode_artifact_directory -type f -name "*scaResults*" -o -name "*SBOM*" 2>/dev/null || echo "No SCA result files found"
+
+    - name: Check if SCA results exist
+      id: check-sca-results
+      run: |
+        # Look for SCA results file
+        if find ./veracode_artifact_directory -name "scaResults.json" 2>/dev/null | grep -q .; then
+          echo "Found scaResults.json"
+          echo "has_results=true" >> $GITHUB_OUTPUT
+        elif find . -path ./veracode-helper -prune -o -name "scaResults.json" -print 2>/dev/null | grep -q .; then
+          echo "Found scaResults.json in source tree"
+          echo "has_results=true" >> $GITHUB_OUTPUT
+        else
+          echo "WARNING: No scaResults.json found - Fix for SCA action requires SCA results"
+          echo "has_results=false" >> $GITHUB_OUTPUT
+        fi
 
     - id: run-fix-sca
+      if: steps.check-sca-results.outputs.has_results == 'true'
       uses: veracode/veracode-fix-for-sca@v0.1.1
       env:
         VERACODE_API_KEY_ID: '${{ secrets.VERACODE_API_ID }}'
@@ -126,15 +145,28 @@ jobs:
         fix-sca-params: ${{ github.event.client_payload.fix_sca_params || '' }}
         github-api-url: ${{ github.api_url }}
 
+    - name: Info - Fix for SCA skipped - no SCA results available
+      if: steps.check-sca-results.outputs.has_results != 'true'
+      run: |
+        echo "Fix for SCA action was skipped because no SCA scan results were found."
+        echo "The Fix for SCA workflow requires pre-existing SCA scan results to generate fixes."
+        echo ""
+        echo "To use this workflow:"
+        echo "1. Ensure SCA scan has completed and produced results"
+        echo "2. Pass the artifact_id as an artifact NAME (e.g., 'sca-scan-results-12345'), not a numeric ID"
+        echo ""
+        echo "Received artifact_id: ${{ github.event.client_payload.artifact_id }}"
+        echo "Is valid: ${{ steps.check-artifact-id.outputs.valid }}"
+
     - name: Download PR comment artifact
-      if: steps.run-fix-sca.outputs.create-pr-run-next-step == 'true'
+      if: steps.check-sca-results.outputs.has_results == 'true' && steps.run-fix-sca.outputs.create-pr-run-next-step == 'true'
       uses: actions/download-artifact@v4
       with:
         name: veracode-cli-pr-comment-json
         path: ./pr-comment-artifact
 
     - name: Post comment to original PR
-      if: steps.run-fix-sca.outputs.create-pr-run-next-step == 'true'
+      if: steps.check-sca-results.outputs.has_results == 'true' && steps.run-fix-sca.outputs.create-pr-run-next-step == 'true'
       uses: actions/github-script@v7
       with:
         github-token: ${{ github.event.client_payload.token }}
