@@ -6,78 +6,8 @@ on:
   repository_dispatch:
     types:
       - veracode-fix-for-sca
-  pull_request:
-    types:
-      - opened
-      - synchronize
-    branches:
-      - main
 
 jobs:
-  check-sca-artifacts:
-    runs-on: ubuntu-latest
-    outputs:
-      artifact-id: ${{ steps.find-artifact.outputs.artifact-id }}
-      artifact-run-id: ${{ steps.find-artifact.outputs.artifact-run-id }}
-      has-artifact: ${{ steps.find-artifact.outputs.has-artifact }}
-    steps:
-      - name: Find SCA scan artifacts with retries
-        id: find-artifact
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Look for SCA artifacts from the current PR with retries (for PR events)
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            MAX_RETRIES=30
-            RETRY_COUNT=0
-            ARTIFACT_ID=""
-            RUN_ID=""
-
-            while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-              echo "Attempt $((RETRY_COUNT + 1))/$MAX_RETRIES: Looking for SCA scan artifacts..."
-
-              # Find the most recent successful SCA workflow run for this repository
-              RUN_ID=$(gh api repos/${{ github.repository }}/actions/runs \
-                --method GET \
-                -f head_sha='${{ github.event.pull_request.head.sha }}' \
-                -q ".workflow_runs[] | select(.name | contains(\"Software Composition Analysis\") and .status == \"completed\") | .id" | head -1)
-
-              if [ ! -z "$RUN_ID" ]; then
-                echo "Found SCA run: $RUN_ID"
-
-                # Now get the artifact name from that run (use name instead of ID for download-artifact@v4)
-                ARTIFACT_ID=$(gh api repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts \
-                  -q ".artifacts[] | select(.expired == false) | .name" | head -1)
-
-                if [ ! -z "$ARTIFACT_ID" ]; then
-                  echo "Found SCA artifact: $ARTIFACT_ID"
-                  break
-                else
-                  echo "Run found but no unexpired artifacts available yet"
-                fi
-              fi
-
-              RETRY_COUNT=$((RETRY_COUNT + 1))
-              if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-                echo "No artifacts found yet. Waiting 10 seconds before retry..."
-                sleep 10
-              fi
-            done
-
-            if [ -z "$ARTIFACT_ID" ] || [ -z "$RUN_ID" ]; then
-              echo "has-artifact=false" >> $GITHUB_OUTPUT
-              echo "WARNING: Could not find SCA artifacts after $MAX_RETRIES attempts - proceeding without local artifacts"
-              exit 0
-            else
-              echo "artifact-id=$ARTIFACT_ID" >> $GITHUB_OUTPUT
-              echo "artifact-run-id=$RUN_ID" >> $GITHUB_OUTPUT
-              echo "has-artifact=true" >> $GITHUB_OUTPUT
-            fi
-          else
-            # For repository_dispatch, artifacts should be provided in client_payload
-            echo "has-artifact=true" >> $GITHUB_OUTPUT
-          fi
-
   cleanup:
     if: github.event_name == 'repository_dispatch'
     uses: ./.github/workflows/veracode-clean-up.yml
@@ -97,8 +27,7 @@ jobs:
       head_sha: ${{ github.event.client_payload.sha }}
 
   fix-for-sca-action:
-    needs: [check-sca-artifacts]
-    runs-on: ${{ github.event_name == 'repository_dispatch' && fromJSON(github.event.client_payload.user_config.default_runs_on) || 'ubuntu-latest' }}
+    runs-on: ${{ fromJSON(github.event.client_payload.user_config.default_runs_on) }}
     steps:
     - name: Create artifact directory
       run: mkdir -p ./veracode_artifact_directory
@@ -165,24 +94,12 @@ jobs:
 
     - uses: actions/checkout@v4
       with:
-        repository: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.repository.full_name || github.repository }}
-        ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.repository.branch || github.head_ref }}
-        token: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.token || secrets.GITHUB_TOKEN }}
+        repository: ${{ github.event.client_payload.repository.full_name }}
+        ref: ${{ github.event.client_payload.repository.branch }}
+        token: ${{ github.event.client_payload.token }}
         path: 'source-code'
 
-    - name: Check for valid SCA results
-      id: check-sca-results
-      run: |
-        if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ needs.check-sca-artifacts.outputs.has-artifact }}" != "true" ]; then
-          echo "PR event with no SCA artifacts found - skipping fix-for-sca action"
-          echo "skip=true" >> $GITHUB_OUTPUT
-        else
-          echo "Repository dispatch or SCA artifacts available - proceeding with fix-for-sca action"
-          echo "skip=false" >> $GITHUB_OUTPUT
-        fi
-
     - id: run-fix-sca
-      if: steps.check-sca-results.outputs.skip == 'false'
       uses: veracode/veracode-fix-for-sca@v0.1.1
       env:
         VERACODE_API_KEY_ID: '${{ secrets.VERACODE_API_ID }}'
@@ -199,14 +116,14 @@ jobs:
         github-api-url: ${{ github.api_url }}
 
     - name: Download PR comment artifact
-      if: steps.check-sca-results.outputs.skip == 'false' && steps.run-fix-sca.outputs.create-pr-run-next-step == 'true'
+      if: steps.run-fix-sca.outputs.create-pr-run-next-step == 'true'
       uses: actions/download-artifact@v4
       with:
         name: veracode-cli-pr-comment-json
         path: ./pr-comment-artifact
 
     - name: Post comment to original PR
-      if: steps.check-sca-results.outputs.skip == 'false' && steps.run-fix-sca.outputs.create-pr-run-next-step == 'true'
+      if: steps.run-fix-sca.outputs.create-pr-run-next-step == 'true'
       uses: actions/github-script@v7
       with:
         github-token: ${{ github.event.client_payload.token }}
@@ -222,8 +139,4 @@ jobs:
             body: data.body
           });
 
-          core.info(`Comment posted to PR #${data.issue_number}`);
-
-    - name: Info - Fix for SCA skipped for PR without SCA results
-      if: steps.check-sca-results.outputs.skip == 'true'
-      run: echo "Fix for SCA action was skipped because no SCA scan results were found for this PR. SCA scanning must complete first." 
+          core.info(`Comment posted to PR #${data.issue_number}`); 
