@@ -170,6 +170,14 @@ jobs:
         token: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.token || secrets.GITHUB_TOKEN }}
         path: 'source-code'
 
+    - name: Debug artifact information
+      run: |
+        echo "Event: ${{ github.event_name }}"
+        echo "Has artifact (PR): ${{ needs.check-sca-artifacts.outputs.has-artifact }}"
+        echo "Artifact ID: ${{ needs.check-sca-artifacts.outputs.artifact-id }}"
+        echo "Artifact Run ID: ${{ needs.check-sca-artifacts.outputs.artifact-run-id }}"
+        echo "Resolved artifact-id for action: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.artifact_id || (needs.check-sca-artifacts.outputs.has-artifact == 'true' && needs.check-sca-artifacts.outputs.artifact-id || '') }}"
+
     - id: run-fix-sca
       uses: veracode/veracode-fix-for-sca@v0.1.1
       env:
@@ -179,8 +187,8 @@ jobs:
       with:
         github-token: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.token || secrets.GITHUB_TOKEN }}
         pr-number: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.issue_number || github.event.pull_request.number }}
-        sca-scan-run-id: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.workflow_run_id || needs.check-sca-artifacts.outputs.artifact-run-id }}
-        sca-scan-artifact-id: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.artifact_id || needs.check-sca-artifacts.outputs.artifact-id }}
+        sca-scan-run-id: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.workflow_run_id || (needs.check-sca-artifacts.outputs.artifact-run-id != '' && needs.check-sca-artifacts.outputs.artifact-run-id || '') }}
+        sca-scan-artifact-id: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.artifact_id || (needs.check-sca-artifacts.outputs.has-artifact == 'true' && needs.check-sca-artifacts.outputs.artifact-id || '') }}
         repository: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.repository.full_name || github.repository }}
         branch: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.repository.branch || github.head_ref }}
         fix-sca-params: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.fix_sca_params || '' }}
