@@ -32,24 +32,29 @@ jobs:
     - name: Create artifact directory
       run: mkdir -p ./veracode_artifact_directory
 
-    - name: Download SCA scan artifact (repository_dispatch)
-      if: github.event_name == 'repository_dispatch'
+    - name: Check if artifact_id looks like a valid name (not just numeric ID)
+      id: check-artifact-id
+      run: |
+        ARTIFACT_ID="${{ github.event.client_payload.artifact_id }}"
+        if [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]]; then
+          echo "Artifact ID is numeric (run/artifact ID), not a valid artifact name - skipping download"
+          echo "valid=false" >> $GITHUB_OUTPUT
+        elif [ -z "$ARTIFACT_ID" ]; then
+          echo "Artifact ID is empty - skipping download"
+          echo "valid=false" >> $GITHUB_OUTPUT
+        else
+          echo "Artifact ID looks like a valid name: $ARTIFACT_ID - will attempt download"
+          echo "valid=true" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Download SCA scan artifact
+      if: steps.check-artifact-id.outputs.valid == 'true'
       continue-on-error: true
       uses: actions/download-artifact@v4
       with:
         github-token: ${{ github.event.client_payload.token }}
         run-id: ${{ github.event.client_payload.workflow_run_id }}
         name: ${{ github.event.client_payload.artifact_id }}
-        path: ./veracode_artifact_directory
-
-    - name: Download SCA scan artifact (pull_request)
-      if: github.event_name == 'pull_request' && needs.check-sca-artifacts.outputs.has-artifact == 'true'
-      continue-on-error: true
-      uses: actions/download-artifact@v4
-      with:
-        github-token: ${{ secrets.GITHUB_TOKEN }}
-        run-id: ${{ needs.check-sca-artifacts.outputs.artifact-run-id }}
-        name: ${{ needs.check-sca-artifacts.outputs.artifact-id }}
         path: ./veracode_artifact_directory
 
     - name: Check out to get veracode CLI
@@ -99,6 +104,12 @@ jobs:
         token: ${{ github.event.client_payload.token }}
         path: 'source-code'
 
+    - name: Debug - Show what artifact info will be passed to action
+      run: |
+        echo "workflow_run_id: ${{ github.event.client_payload.workflow_run_id }}"
+        echo "artifact_id (raw): ${{ github.event.client_payload.artifact_id }}"
+        echo "artifact_id (valid): ${{ steps.check-artifact-id.outputs.valid }}"
+
     - id: run-fix-sca
       uses: veracode/veracode-fix-for-sca@v0.1.1
       env:
@@ -109,7 +120,7 @@ jobs:
         github-token: ${{ github.event.client_payload.token }}
         pr-number: ${{ github.event.client_payload.issue_number }}
         sca-scan-run-id: ${{ github.event.client_payload.workflow_run_id }}
-        sca-scan-artifact-id: ${{ github.event.client_payload.artifact_id }}
+        sca-scan-artifact-id: ${{ steps.check-artifact-id.outputs.valid == 'true' && github.event.client_payload.artifact_id || '' }}
         repository: ${{ github.event.client_payload.repository.full_name }}
         branch: ${{ github.event.client_payload.repository.branch }}
         fix-sca-params: ${{ github.event.client_payload.fix_sca_params || '' }}
