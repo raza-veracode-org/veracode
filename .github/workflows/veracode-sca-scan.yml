@@ -152,6 +152,7 @@ jobs:
             helper/cli/*
 
       - name: Run Veracode SCA
+        id: sca-scan
         env:
           SRCCLR_API_TOKEN: ${{ secrets.VERACODE_AGENT_TOKEN }}
           JAVA_OPTS: -Xms2g -Xmx4g
@@ -168,4 +169,14 @@ jobs:
           sca_fix_enabled: ${{ github.event.client_payload.user_config.sca_fix_enabled }}
           profile_name: ${{ github.event.client_payload.user_config.profile_name }}
           pr_number: ${{ github.event.client_payload.pr_number }}
+
+      - name: Upload SCA scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sca-scan-results-${{ github.run_id }}
+          path: |
+            .srcclr/
+            sbom.json
+          retention-days: 1
 
