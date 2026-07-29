@@ -111,7 +111,8 @@ jobs:
         path: ./veracode_artifact_directory
 
     - name: Download SCA scan artifact (pull_request)
-      if: github.event_name == 'pull_request'
+      if: github.event_name == 'pull_request' && needs.check-sca-artifacts.outputs.artifact-id != ''
+      continue-on-error: true
       uses: actions/download-artifact@v4
       with:
         github-token: ${{ secrets.GITHUB_TOKEN }}
