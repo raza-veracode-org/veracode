@@ -1,22 +1,30 @@
 name: Veracode Software Composition Analysis
 
-run-name: Software Composition Analysis - ${{ github.event.client_payload.repository.name }}
+run-name: Software Composition Analysis - ${{ github.event.client_payload.repository.name || github.repository }}
 
 concurrency:
-  group: ${{ github.event.client_payload.event_type }}-${{ github.event.client_payload.repository.name }}-${{ github.event.client_payload.repository.branch }}
+  group: ${{ github.event_name }}-${{ github.event.client_payload.repository.name || github.repository }}-${{ github.event.client_payload.repository.branch || github.head_ref }}
   cancel-in-progress: true
 
 on:
   repository_dispatch:
     types: [veracode-sca-scan]
+  pull_request:
+    types:
+      - opened
+      - synchronize
+    branches:
+      - main
 
 jobs:
   cleanup:
+    if: github.event_name == 'repository_dispatch'
     uses: ./.github/workflows/veracode-clean-up.yml
     with:
       runs_on: ${{ github.event.client_payload.user_config.default_runs_on }}
 
   register:
+    if: github.event_name == 'repository_dispatch'
     needs: cleanup
     uses: ./.github/workflows/veracode-check-run.yml
     with:
@@ -32,17 +40,17 @@ jobs:
       default_runs_on: ${{ github.event.client_payload.user_config.default_runs_on }}
 
   veracode-sca-scan:
-    needs: [register]
-    runs-on: ${{ fromJSON(github.event.client_payload.user_config.default_runs_on) }}
+    needs: ${{ github.event_name == 'repository_dispatch' && fromJSON('["register"]') || fromJSON('[]') }}
+    runs-on: ${{ github.event_name == 'repository_dispatch' && fromJSON(github.event.client_payload.user_config.default_runs_on) || 'ubuntu-latest' }}
     name: Veracode Component Analysis
     timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.client_payload.repository.full_name }}
-          ref: ${{ github.event.client_payload.repository.branch }}
-          token: ${{ github.event.client_payload.token }}
+          repository: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.repository.full_name || github.repository }}
+          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.repository.branch || github.head_ref }}
+          token: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.token || secrets.GITHUB_TOKEN }}
       - uses: actions/checkout@v4
         with:
           path: 'veracode-helper'
@@ -164,11 +172,11 @@ jobs:
           create-issues: false
           recursive: true
           allow-dirty: true
-          breakBuildOnPolicyFindings: ${{ github.event.client_payload.user_config.break_build_policy_findings }}
-          debug: ${{ github.event.client_payload.user_config.debug }}
-          sca_fix_enabled: ${{ github.event.client_payload.user_config.sca_fix_enabled }}
-          profile_name: ${{ github.event.client_payload.user_config.profile_name }}
-          pr_number: ${{ github.event.client_payload.pr_number }}
+          breakBuildOnPolicyFindings: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.user_config.break_build_policy_findings || false }}
+          debug: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.user_config.debug || false }}
+          sca_fix_enabled: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.user_config.sca_fix_enabled || true }}
+          profile_name: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.user_config.profile_name || 'default' }}
+          pr_number: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.pr_number || github.event.pull_request.number }}
 
       - name: Upload SCA scan results
         if: always()
