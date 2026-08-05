@@ -40,7 +40,6 @@ jobs:
         script: |
           const fs = require('fs');
           const path = require('path');
-          const zlib = require('zlib');
           const owner = '${{ github.event.client_payload.repository.owner }}';
           const repo = '${{ github.event.client_payload.repository.name }}';
           const runId = ${{ github.event.client_payload.workflow_run_id }};
@@ -49,15 +48,44 @@ jobs:
           console.log(`\n📦 Downloading SCA artifacts from ${owner}/${repo} run ${runId}\n`);
 
           try {
-            // List artifacts for this run
-            const listResponse = await github.rest.actions.listWorkflowRunArtifacts({
-              owner,
-              repo,
-              run_id: runId,
-              per_page: 50
-            });
+            // First verify repository exists and we have access
+            console.log('🔍 Verifying repository access...');
+            try {
+              const repoInfo = await github.rest.repos.get({
+                owner,
+                repo
+              });
+              console.log(`✅ Repository accessible: ${repoInfo.data.full_name}`);
+            } catch (repoError) {
+              console.log(`❌ Cannot access repository: ${repoError.message}`);
+              core.setOutput('success', 'false');
+              return;
+            }
 
-            console.log('Available artifacts:');
+            // List artifacts for this run
+            console.log(`\n🔍 Querying artifacts for workflow run ${runId}...`);
+            let listResponse;
+            try {
+              listResponse = await github.rest.actions.listWorkflowRunArtifacts({
+                owner,
+                repo,
+                run_id: runId,
+                per_page: 50
+              });
+              console.log(`✅ Successfully listed artifacts`);
+            } catch (listError) {
+              console.log(`❌ Error listing artifacts: ${listError.message}`);
+              if (listError.status === 404) {
+                console.log('   This could mean:');
+                console.log('   - The workflow run ID is incorrect');
+                console.log('   - The artifacts have expired (default: 90 days)');
+                console.log('   - The repository access is denied');
+              }
+              core.setOutput('success', 'false');
+              return;
+            }
+
+            console.log(`\n📋 Available artifacts (total: ${listResponse.data.artifacts.length}):`);
             if (!listResponse.data.artifacts || listResponse.data.artifacts.length === 0) {
               console.log('❌ No artifacts found in this workflow run');
               core.setOutput('success', 'false');
@@ -65,7 +93,7 @@ jobs:
             }
 
             listResponse.data.artifacts.forEach(artifact => {
-              console.log(`  - ${artifact.name} (ID: ${artifact.id})`);
+              console.log(`  - ${artifact.name} (ID: ${artifact.id}, ${artifact.size_in_bytes} bytes)`);
             });
 
             // Find SCA results artifact
@@ -75,20 +103,34 @@ jobs:
 
             if (!scaArtifact) {
               console.log('\n❌ No SCA scan results artifact found');
+              console.log('Available artifacts do not include sca-scan-results');
               core.setOutput('success', 'false');
               return;
             }
 
-            console.log(`\n✅ Found SCA artifact: ${scaArtifact.name}`);
+            console.log(`\n✅ Found SCA artifact: ${scaArtifact.name} (ID: ${scaArtifact.id})`);
 
             // Download the artifact as zip
             console.log(`\n⏳ Downloading artifact ${scaArtifact.id}...`);
-            const downloadResponse = await github.rest.actions.downloadArtifact({
-              owner,
-              repo,
-              artifact_id: scaArtifact.id,
-              archive_format: 'zip'
-            });
+            let downloadResponse;
+            try {
+              downloadResponse = await github.rest.actions.downloadArtifact({
+                owner,
+                repo,
+                artifact_id: scaArtifact.id,
+                archive_format: 'zip'
+              });
+              console.log(`✅ Artifact downloaded (${downloadResponse.data.length} bytes)`);
+            } catch (downloadError) {
+              console.log(`❌ Error downloading artifact: ${downloadError.message}`);
+              if (downloadError.status === 404) {
+                console.log('   Artifact may have expired or been deleted');
+              } else if (downloadError.status === 403) {
+                console.log('   Access denied - token may not have permission');
+              }
+              core.setOutput('success', 'false');
+              return;
+            }
 
             // Create directory if it doesn't exist
             fs.mkdirSync(artifactDir, { recursive: true });
@@ -105,7 +147,7 @@ jobs:
             console.log(`✅ Artifact extracted to ${artifactDir}`);
 
             // List extracted contents
-            console.log('\nExtracted files:');
+            console.log('\n📂 Extracted files:');
             const listDir = (dir, prefix = '') => {
               try {
                 const files = fs.readdirSync(dir);
@@ -128,7 +170,8 @@ jobs:
             core.setOutput('artifact-name', scaArtifact.name);
 
           } catch (error) {
-            console.log(`\n❌ Error: ${error.message}`);
+            console.log(`\n❌ Unexpected error: ${error.message}`);
+            console.log(`   Stack: ${error.stack}`);
             core.setOutput('success', 'false');
           }
 
