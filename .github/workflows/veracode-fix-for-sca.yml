@@ -1,6 +1,6 @@
 name: Veracode Fix for SCA
 
-run-name: Veracode Fix for SCA - ${{ github.event.client_payload.repository.name }}
+run-name: Veracode Fix for SCA - ${{ github.event.client_payload.workflow_name }}
 
 on:
   repository_dispatch:
@@ -9,13 +9,11 @@ on:
 
 jobs:
   cleanup:
-    if: github.event_name == 'repository_dispatch'
     uses: ./.github/workflows/veracode-clean-up.yml
     with:
       runs_on: ${{ github.event.client_payload.user_config.default_runs_on }}
 
   create_metadata:
-    if: github.event_name == 'repository_dispatch'
     needs: cleanup
     uses: ./.github/workflows/veracode-metadata.yml
     with:
@@ -27,201 +25,37 @@ jobs:
       head_sha: ${{ github.event.client_payload.sha }}
 
   fix-for-sca-action:
+    needs: create_metadata
     runs-on: ${{ fromJSON(github.event.client_payload.user_config.default_runs_on) }}
     steps:
-    - name: Debug - Log event payload
+    - name: Configure git for LF line endings (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
       run: |
-        echo "📋 Event Payload Information:"
-        echo "  Repository: ${{ github.event.client_payload.repository.owner }}/${{ github.event.client_payload.repository.name }}"
-        echo "  Workflow Run ID: ${{ github.event.client_payload.workflow_run_id }}"
-        echo "  PR Number: ${{ github.event.client_payload.issue_number }}"
-        echo "  Branch: ${{ github.event.client_payload.repository.branch }}"
-        echo "  SHA: ${{ github.event.client_payload.sha }}"
+        git config --global core.eol lf
+        git config --global core.autocrlf false
 
-    - name: Create artifact directory
-      run: mkdir -p ./veracode_artifact_directory
+    - name: Initialize Git repository in root (for analytics)
+      shell: bash
+      run: |
+        git init
+        git config user.name "GitHub Actions"
+        git config user.email "actions@github.com"
+        echo "# Veracode Workflow" > README.md
+        git add README.md
+        git commit -m "Initial commit for analytics"
+        echo "Git repository initialized with commit"
 
-    - name: Download SCA scan artifact from source repository
-      id: download-artifact
-      uses: actions/github-script@v7
+    - name: Check out source code
+      uses: actions/checkout@v6
       with:
-        github-token: ${{ github.event.client_payload.token }}
-        script: |
-          const fs = require('fs');
-          const path = require('path');
-          const owner = '${{ github.event.client_payload.repository.owner }}';
-          const repo = '${{ github.event.client_payload.repository.name }}';
-          const runId = ${{ github.event.client_payload.workflow_run_id }};
-          const artifactDir = './veracode_artifact_directory';
-
-          console.log(`\n📦 Downloading SCA artifacts from ${owner}/${repo} run ${runId}\n`);
-
-          try {
-            // First verify repository exists and we have access
-            console.log('🔍 Verifying repository access...');
-            try {
-              const repoInfo = await github.rest.repos.get({
-                owner,
-                repo
-              });
-              console.log(`✅ Repository accessible: ${repoInfo.data.full_name}`);
-            } catch (repoError) {
-              console.log(`❌ Cannot access repository: ${repoError.message}`);
-              core.setOutput('success', 'false');
-              return;
-            }
-
-            // List artifacts for this run
-            console.log(`\n🔍 Querying artifacts for workflow run ${runId}...`);
-            let listResponse;
-            try {
-              listResponse = await github.rest.actions.listWorkflowRunArtifacts({
-                owner,
-                repo,
-                run_id: runId,
-                per_page: 50
-              });
-              console.log(`✅ Successfully listed artifacts`);
-            } catch (listError) {
-              console.log(`❌ Error listing artifacts: ${listError.message}`);
-              if (listError.status === 404) {
-                console.log('   Run ID may be incorrect. Let me search for recent runs with SCA artifacts...\n');
-
-                // Search for recent workflow runs to find one with artifacts
-                try {
-                  const runsResponse = await github.rest.actions.listWorkflowRuns({
-                    owner,
-                    repo,
-                    workflow_id: 'veracode-sca-scan.yml',
-                    per_page: 10
-                  });
-
-                  console.log(`📋 Recent SCA workflow runs in ${owner}/${repo}:`);
-                  if (runsResponse.data.workflow_runs && runsResponse.data.workflow_runs.length > 0) {
-                    for (const run of runsResponse.data.workflow_runs.slice(0, 5)) {
-                      console.log(`  - Run ID: ${run.id}, Status: ${run.status}, Conclusion: ${run.conclusion}`);
-
-                      // Try to get artifacts for this run
-                      try {
-                        const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
-                          owner,
-                          repo,
-                          run_id: run.id,
-                          per_page: 10
-                        });
-                        if (artifacts.data.artifacts && artifacts.data.artifacts.length > 0) {
-                          console.log(`    ✅ Has ${artifacts.data.artifacts.length} artifacts:`);
-                          artifacts.data.artifacts.forEach(a => {
-                            console.log(`       - ${a.name}`);
-                          });
-                        }
-                      } catch (e) {
-                        // Ignore errors in listing this run's artifacts
-                      }
-                    }
-                  } else {
-                    console.log('  No recent SCA workflow runs found');
-                  }
-                } catch (searchError) {
-                  console.log(`  Could not search for recent runs: ${searchError.message}`);
-                }
-              }
-              core.setOutput('success', 'false');
-              return;
-            }
-
-            console.log(`\n📋 Available artifacts (total: ${listResponse.data.artifacts.length}):`);
-            if (!listResponse.data.artifacts || listResponse.data.artifacts.length === 0) {
-              console.log('❌ No artifacts found in this workflow run');
-              core.setOutput('success', 'false');
-              return;
-            }
-
-            listResponse.data.artifacts.forEach(artifact => {
-              console.log(`  - ${artifact.name} (ID: ${artifact.id}, ${artifact.size_in_bytes} bytes)`);
-            });
-
-            // Find SCA results artifact
-            const scaArtifact = listResponse.data.artifacts.find(a =>
-              a.name && a.name.includes('sca-scan-results')
-            );
-
-            if (!scaArtifact) {
-              console.log('\n❌ No SCA scan results artifact found');
-              console.log('Available artifacts do not include sca-scan-results');
-              core.setOutput('success', 'false');
-              return;
-            }
-
-            console.log(`\n✅ Found SCA artifact: ${scaArtifact.name} (ID: ${scaArtifact.id})`);
-
-            // Download the artifact as zip
-            console.log(`\n⏳ Downloading artifact ${scaArtifact.id}...`);
-            let downloadResponse;
-            try {
-              downloadResponse = await github.rest.actions.downloadArtifact({
-                owner,
-                repo,
-                artifact_id: scaArtifact.id,
-                archive_format: 'zip'
-              });
-              console.log(`✅ Artifact downloaded (${downloadResponse.data.length} bytes)`);
-            } catch (downloadError) {
-              console.log(`❌ Error downloading artifact: ${downloadError.message}`);
-              if (downloadError.status === 404) {
-                console.log('   Artifact may have expired or been deleted');
-              } else if (downloadError.status === 403) {
-                console.log('   Access denied - token may not have permission');
-              }
-              core.setOutput('success', 'false');
-              return;
-            }
-
-            // Create directory if it doesn't exist
-            fs.mkdirSync(artifactDir, { recursive: true });
-
-            // Write the zip file
-            const zipPath = path.join(artifactDir, 'artifact.zip');
-            fs.writeFileSync(zipPath, Buffer.from(downloadResponse.data));
-            console.log(`✅ Zip file saved to ${zipPath}`);
-
-            // Extract the zip file
-            const AdmZip = require('adm-zip');
-            const zip = new AdmZip(zipPath);
-            zip.extractAllTo(artifactDir, true);
-            console.log(`✅ Artifact extracted to ${artifactDir}`);
-
-            // List extracted contents
-            console.log('\n📂 Extracted files:');
-            const listDir = (dir, prefix = '') => {
-              try {
-                const files = fs.readdirSync(dir);
-                files.forEach(file => {
-                  const filePath = path.join(dir, file);
-                  const stat = fs.statSync(filePath);
-                  console.log(`  ${prefix}${file}${stat.isDirectory() ? '/' : ''}`);
-                  if (stat.isDirectory() && prefix.length < 4) {
-                    listDir(filePath, prefix + '  ');
-                  }
-                });
-              } catch (e) {
-                console.log(`  ${prefix}[error reading directory]`);
-              }
-            };
-            listDir(artifactDir);
-
-            console.log('\n✅ Artifact download and extraction complete');
-            core.setOutput('success', 'true');
-            core.setOutput('artifact-name', scaArtifact.name);
-
-          } catch (error) {
-            console.log(`\n❌ Unexpected error: ${error.message}`);
-            console.log(`   Stack: ${error.stack}`);
-            core.setOutput('success', 'false');
-          }
+        repository: ${{ github.event.client_payload.repository.full_name }}
+        ref: ${{ github.event.client_payload.repository.branch }}
+        token: ${{ github.event.client_payload.token }}
+        path: 'source-code'
 
     - name: Check out to get veracode CLI
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       with:
         path: 'veracode-helper'
         fetch-depth: 0
@@ -253,117 +87,45 @@ jobs:
         $current_path = "$env:APPDATA\veracode"
         echo "cli-path=$current_path" >> $env:GITHUB_OUTPUT
 
-    - name: Configure git for LF line endings (Windows)
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        git config --global core.eol lf
-        git config --global core.autocrlf false
-
-    - uses: actions/checkout@v4
+    - name: Download SCA scan artifact
+      uses: actions/download-artifact@v7
       with:
-        repository: ${{ github.event.client_payload.repository.full_name }}
-        ref: ${{ github.event.client_payload.repository.branch }}
-        token: ${{ github.event.client_payload.token }}
-        path: 'source-code'
+        github-token: ${{ github.event.client_payload.token }}
+        run-id: ${{ github.event.client_payload.workflow_run_id }}
+        artifact-ids: ${{ github.event.client_payload.artifact_id }}
+        path: ./veracode_artifact_directory/Veracode Agent Based SCA Results
 
-    - name: Check if SCA results exist
-      id: check-sca-results
+    - name: Debug - Verify artifact contents
+      shell: bash
       run: |
-        has_results="false"
-
-        echo "📋 Checking artifact contents for actual SCA results..."
+        echo "=== Artifact directory structure ==="
+        ls -la ./veracode_artifact_directory/ || echo "veracode_artifact_directory not found"
         echo ""
-        ls -la ./veracode_artifact_directory/ 2>/dev/null || echo "Artifact directory not found"
+        echo "=== Checking for Veracode Agent Based SCA Results ==="
+        ls -la "./veracode_artifact_directory/Veracode Agent Based SCA Results/" || echo "SCA Results directory not found"
         echo ""
-
-        # Look for actual SCA result files (not just metadata)
-        if [ -d "./veracode_artifact_directory/.srcclr" ]; then
-          if [ -n "$(find ./veracode_artifact_directory/.srcclr -type f 2>/dev/null)" ]; then
-            echo "✅ Found .srcclr directory with files"
-            has_results="true"
-          fi
+        echo "=== Checking for scaResults.json ==="
+        if [ -f "./veracode_artifact_directory/Veracode Agent Based SCA Results/scaResults.json" ]; then
+          echo "scaResults.json found!"
+          ls -lh "./veracode_artifact_directory/Veracode Agent Based SCA Results/scaResults.json"
+          echo "First 10 lines:"
+          head -10 "./veracode_artifact_directory/Veracode Agent Based SCA Results/scaResults.json"
+        else
+          echo "scaResults.json NOT FOUND"
         fi
-
-        if [ -d "./veracode_artifact_directory/.veracode" ]; then
-          if [ -n "$(find ./veracode_artifact_directory/.veracode -type f 2>/dev/null)" ]; then
-            echo "✅ Found .veracode directory with files"
-            has_results="true"
-          fi
-        fi
-
-        if [ -f "./veracode_artifact_directory/scaResults.json" ]; then
-          echo "✅ Found scaResults.json"
-          has_results="true"
-        fi
-
-        if [ -f "./veracode_artifact_directory/SBOM.json" ] || [ -f "./veracode_artifact_directory/sbom.json" ]; then
-          echo "✅ Found SBOM file"
-          has_results="true"
-        fi
-
-        if [ "$has_results" = "false" ]; then
-          echo "⚠️  No SCA result files found in artifact"
-          echo "Artifact contains only metadata (scan may have completed with no findings)"
-        fi
-
-        echo "has_results=$has_results" >> $GITHUB_OUTPUT
 
     - id: run-fix-sca
-      if: steps.check-sca-results.outputs.has_results == 'true'
-      uses: veracode/veracode-fix-for-sca@v0.1.1
+      uses: veracode/veracode-fix-for-sca@v0.1.3
       env:
         VERACODE_API_KEY_ID: '${{ secrets.VERACODE_API_ID }}'
         VERACODE_API_KEY_SECRET: '${{ secrets.VERACODE_API_KEY }}'
         CLI_PATH: ${{ runner.os == 'Windows' && steps.cli-setup-windows.outputs.cli-path || steps.cli-setup-unix.outputs.cli-path }}
       with:
         github-token: ${{ github.event.client_payload.token }}
-        pr-number: ${{ github.event.client_payload.issue_number }}
-        sca-scan-run-id: ${{ github.event.client_payload.workflow_run_id }}
-        sca-scan-artifact-id: ${{ steps.download-artifact.outputs.artifact-name }}
+        pr-number: ${{ github.event.client_payload.issue_number }} 
+        sca-scan-run-id: ${{ github.event.client_payload.workflow_run_id }} 
+        sca-scan-artifact-id: ${{ github.event.client_payload.artifact_id }} 
         repository: ${{ github.event.client_payload.repository.full_name }}
-        branch: ${{ github.event.client_payload.repository.branch }}
-        fix-sca-params: ${{ github.event.client_payload.fix_sca_params || '' }}
-        github-api-url: ${{ github.api_url }}
-
-    - name: Info - Fix for SCA skipped - no SCA results available
-      if: steps.check-sca-results.outputs.has_results != 'true'
-      run: |
-        echo "ℹ️  Fix for SCA action was skipped because no SCA scan results were found."
-        echo "The Fix for SCA workflow requires pre-existing SCA scan results to generate fixes."
-        echo ""
-        echo "Artifact downloaded: ${{ steps.download-artifact.outputs.artifact-name }}"
-
-    - name: Download PR comment artifact
-      if: steps.check-sca-results.outputs.has_results == 'true' && steps.run-fix-sca.outputs.create-pr-run-next-step == 'true'
-      continue-on-error: true
-      uses: actions/download-artifact@v4
-      with:
-        name: veracode-cli-pr-comment-json
-        path: ./pr-comment-artifact
-
-    - name: Post comment to original PR
-      if: steps.check-sca-results.outputs.has_results == 'true' && steps.run-fix-sca.outputs.create-pr-run-next-step == 'true' && hashFiles('./pr-comment-artifact/veracode-cli.pr-comment.json') != ''
-      uses: actions/github-script@v7
-      with:
-        github-token: ${{ github.event.client_payload.token }}
-        script: |
-          const fs = require('fs');
-          const path = require('path');
-          const filePath = path.join('./pr-comment-artifact', 'veracode-cli.pr-comment.json');
-
-          if (!fs.existsSync(filePath)) {
-            core.warning('PR comment artifact not found');
-            return;
-          }
-
-          const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-
-          await github.rest.issues.createComment({
-            owner: data.repository_owner,
-            repo: data.repository_name,
-            issue_number: data.issue_number,
-            body: data.body
-          });
-
-          core.info(`Comment posted to PR #${data.issue_number}`);
+        branch: ${{ github.event.client_payload.repository.branch }} 
+        fix-sca-params: ${{ github.event.client_payload.fix_sca_params }} 
+        github-api-url: ${{ github.api_url }} 

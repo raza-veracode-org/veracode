@@ -1,30 +1,22 @@
 name: Veracode Software Composition Analysis
 
-run-name: Software Composition Analysis - ${{ github.event.client_payload.repository.name || github.repository }}
+run-name: Software Composition Analysis - ${{ github.event.client_payload.workflow_name }}
 
 concurrency:
-  group: ${{ github.event_name }}-${{ github.event.client_payload.repository.name || github.repository }}-${{ github.event.client_payload.repository.branch || github.head_ref }}
+  group: ${{ github.event.client_payload.event_type }}-${{ github.event.client_payload.repository.name }}-${{ github.event.client_payload.repository.branch }}
   cancel-in-progress: true
 
 on:
   repository_dispatch:
     types: [veracode-sca-scan]
-  pull_request:
-    types:
-      - opened
-      - synchronize
-    branches:
-      - main
 
 jobs:
   cleanup:
-    if: github.event_name == 'repository_dispatch'
     uses: ./.github/workflows/veracode-clean-up.yml
     with:
       runs_on: ${{ github.event.client_payload.user_config.default_runs_on }}
 
   register:
-    if: github.event_name == 'repository_dispatch'
     needs: cleanup
     uses: ./.github/workflows/veracode-check-run.yml
     with:
@@ -41,18 +33,17 @@ jobs:
 
   veracode-sca-scan:
     needs: [register]
-    if: always()
-    runs-on: ${{ github.event_name == 'repository_dispatch' && fromJson(github.event.client_payload.user_config.default_runs_on) || 'ubuntu-latest' }}
+    runs-on: ${{ fromJSON(github.event.client_payload.user_config.default_runs_on) }}
     name: Veracode Component Analysis
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
-          repository: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.repository.full_name || github.repository }}
-          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.repository.branch || github.head_ref }}
-          token: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.token || secrets.GITHUB_TOKEN }}
-      - uses: actions/checkout@v4
+          repository: ${{ github.event.client_payload.repository.full_name }}
+          ref: ${{ github.event.client_payload.repository.branch }}
+          token: ${{ github.event.client_payload.token }}
+      - uses: actions/checkout@v6
         with:
           path: 'veracode-helper'
 
@@ -152,7 +143,7 @@ jobs:
             Remove-Item -Recurse -Force "veracode-helper" -ErrorAction SilentlyContinue
 
       - name: Check out to get veracode CLI
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: 'veracode-helper'
           fetch-depth: 0
@@ -161,89 +152,88 @@ jobs:
             helper/cli/*
 
       - name: Run Veracode SCA
-        id: sca-scan
+        id: veracode-sca
         env:
           SRCCLR_API_TOKEN: ${{ secrets.VERACODE_AGENT_TOKEN }}
           JAVA_OPTS: -Xms2g -Xmx4g
           VERACODE_API_KEY_ID: '${{ secrets.VERACODE_API_ID }}'
           VERACODE_API_KEY_SECRET: '${{ secrets.VERACODE_API_KEY }}'
-        uses: "veracode/veracode-sca@v2.1.18"
+        uses: veracode/veracode-sca@v2.1.19
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           create-issues: false
           recursive: true
           allow-dirty: true
-          breakBuildOnPolicyFindings: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.user_config.break_build_policy_findings || false }}
-          debug: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.user_config.debug || false }}
-          sca_fix_enabled: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.user_config.sca_fix_enabled || true }}
-          profile_name: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.user_config.profile_name || 'default' }}
-          pr_number: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.pr_number || github.event.pull_request.number }}
+          breakBuildOnPolicyFindings: ${{ github.event.client_payload.user_config.break_build_policy_findings }}
+          debug: ${{ github.event.client_payload.user_config.debug }}
+          sca_fix_enabled: ${{ github.event.client_payload.user_config.sca_fix_enabled }}
+          profile_name: ${{ github.event.client_payload.user_config.profile_name }}
+          pr_number: ${{ github.event.client_payload.pr_number }}
 
-      - name: Check for SCA output files
-        id: check-sca-files
+      - name: Debug - Check SCA Fix Enabled
+        if: always()
+        shell: bash
         run: |
-          echo "Checking for SCA output files..."
-          echo "Looking for SCA result files and directories..."
+          echo "SCA Fix Enabled value: '${{ github.event.client_payload.user_config.sca_fix_enabled }}'"
+          echo "Type check - string 'true': ${{ github.event.client_payload.user_config.sca_fix_enabled == 'true' }}"
+          echo "Type check - boolean true: ${{ github.event.client_payload.user_config.sca_fix_enabled == true }}"
 
-          found_results="false"
-
-          # Check for scaResults.json
-          if find . -maxdepth 5 -name "scaResults.json" 2>/dev/null | grep -q .; then
-            echo "✓ Found scaResults.json"
-            found_results="true"
-          fi
-
-          # Check for SBOM files
-          if find . -maxdepth 5 -name "SBOM.json" -o -name "sbom.json" 2>/dev/null | grep -q .; then
-            echo "✓ Found SBOM file"
-            found_results="true"
-          fi
-
-          # Check for .srcclr directory
-          if [ -d ".srcclr" ]; then
-            echo "✓ Found .srcclr directory"
-            found_results="true"
-            ls -la .srcclr | head -10
-          fi
-
-          # Check for .veracode directory
-          if [ -d ".veracode" ]; then
-            echo "✓ Found .veracode directory"
-            found_results="true"
-            ls -la .veracode | head -10
-          fi
-
-          echo "found-results=$found_results" >> $GITHUB_OUTPUT
-          echo "SCA results found: $found_results"
-
-      - name: Create SCA results directory
+      - name: Debug - List all JSON files
+        if: always()
+        shell: bash
         run: |
-          mkdir -p ./sca-results-archive
+          echo "=== All JSON files in workspace ==="
+          find . -name "*.json" -type f 2>/dev/null | grep -v node_modules | head -30 || echo "No JSON files found"
+          echo ""
+          echo "=== Checking specific directories ==="
+          ls -la .srcclr/ 2>/dev/null || echo "No .srcclr directory"
+          ls -la veracode-results/ 2>/dev/null || echo "No veracode-results directory"
+          echo ""
+          echo "=== Checking for srcclr agent output ==="
+          ls -la ~/.srcclr/ 2>/dev/null || echo "No ~/.srcclr directory"
 
-          # Copy SCA results if they exist
-          [ -d ".srcclr" ] && cp -r .srcclr ./sca-results-archive/ || true
-          [ -d ".veracode" ] && cp -r .veracode ./sca-results-archive/ || true
-          [ -f "sbom.json" ] && cp sbom.json ./sca-results-archive/ || true
-          [ -f "SBOM.json" ] && cp SBOM.json ./sca-results-archive/ || true
-          [ -f "scaResults.json" ] && cp scaResults.json ./sca-results-archive/ || true
-
-      - name: Create metadata file
+      - name: Generate SCA Results JSON for Fix
+        if: always()
+        shell: bash
         run: |
-          cat > ./sca-results-archive/scan-metadata.json <<EOF
-          {
-            "run_id": "${{ github.run_id }}",
-            "workflow_name": "${{ github.workflow }}",
-            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "event": "${{ github.event_name }}",
-            "branch": "${{ github.ref_name }}"
-          }
-          EOF
+          echo "Searching for SCA results files..."
 
-      - name: Upload SCA scan results artifact
+          # Look for results in common locations
+          if [ -f "results.json" ]; then
+            echo "Found results.json in root"
+            result_file="results.json"
+          elif [ -f ".srcclr/results.json" ]; then
+            echo "Found results.json in .srcclr"
+            result_file=".srcclr/results.json"
+          else
+            # Search for any results file
+            result_file=$(find . -name "results.json" -o -name "*sca*.json" -o -name "agent-results.json" 2>/dev/null | grep -v node_modules | head -1)
+          fi
+
+          # Create the artifact directory structure
+          mkdir -p "Veracode Agent Based SCA Results"
+
+          if [ -n "$result_file" ] && [ -f "$result_file" ]; then
+            echo "Copying $result_file to scaResults.json"
+            cp "$result_file" "Veracode Agent Based SCA Results/scaResults.json"
+            echo "File copied successfully"
+          else
+            echo "Warning: No SCA results file found. Creating placeholder."
+            echo '{"vulnerabilities":[],"libraries":[],"scan_status":"no_results"}' > "Veracode Agent Based SCA Results/scaResults.json"
+          fi
+
+          echo "Contents of artifact directory:"
+          ls -la "Veracode Agent Based SCA Results/"
+          echo ""
+          echo "Content of scaResults.json:"
+          cat "Veracode Agent Based SCA Results/scaResults.json" | head -20
+
+      - name: Upload SCA Results for Fix
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: sca-scan-results-${{ github.run_id }}
-          path: ./sca-results-archive/
-          retention-days: 1
+          name: Veracode Agent Based SCA Results
+          path: Veracode Agent Based SCA Results/
+          retention-days: 30
+
 
