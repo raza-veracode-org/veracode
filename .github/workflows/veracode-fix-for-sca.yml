@@ -29,6 +29,15 @@ jobs:
   fix-for-sca-action:
     runs-on: ${{ fromJSON(github.event.client_payload.user_config.default_runs_on) }}
     steps:
+    - name: Debug - Log event payload
+      run: |
+        echo "📋 Event Payload Information:"
+        echo "  Repository: ${{ github.event.client_payload.repository.owner }}/${{ github.event.client_payload.repository.name }}"
+        echo "  Workflow Run ID: ${{ github.event.client_payload.workflow_run_id }}"
+        echo "  PR Number: ${{ github.event.client_payload.issue_number }}"
+        echo "  Branch: ${{ github.event.client_payload.repository.branch }}"
+        echo "  SHA: ${{ github.event.client_payload.sha }}"
+
     - name: Create artifact directory
       run: mkdir -p ./veracode_artifact_directory
 
@@ -76,10 +85,46 @@ jobs:
             } catch (listError) {
               console.log(`❌ Error listing artifacts: ${listError.message}`);
               if (listError.status === 404) {
-                console.log('   This could mean:');
-                console.log('   - The workflow run ID is incorrect');
-                console.log('   - The artifacts have expired (default: 90 days)');
-                console.log('   - The repository access is denied');
+                console.log('   Run ID may be incorrect. Let me search for recent runs with SCA artifacts...\n');
+
+                // Search for recent workflow runs to find one with artifacts
+                try {
+                  const runsResponse = await github.rest.actions.listWorkflowRuns({
+                    owner,
+                    repo,
+                    workflow_id: 'veracode-sca-scan.yml',
+                    per_page: 10
+                  });
+
+                  console.log(`📋 Recent SCA workflow runs in ${owner}/${repo}:`);
+                  if (runsResponse.data.workflow_runs && runsResponse.data.workflow_runs.length > 0) {
+                    for (const run of runsResponse.data.workflow_runs.slice(0, 5)) {
+                      console.log(`  - Run ID: ${run.id}, Status: ${run.status}, Conclusion: ${run.conclusion}`);
+
+                      // Try to get artifacts for this run
+                      try {
+                        const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
+                          owner,
+                          repo,
+                          run_id: run.id,
+                          per_page: 10
+                        });
+                        if (artifacts.data.artifacts && artifacts.data.artifacts.length > 0) {
+                          console.log(`    ✅ Has ${artifacts.data.artifacts.length} artifacts:`);
+                          artifacts.data.artifacts.forEach(a => {
+                            console.log(`       - ${a.name}`);
+                          });
+                        }
+                      } catch (e) {
+                        // Ignore errors in listing this run's artifacts
+                      }
+                    }
+                  } else {
+                    console.log('  No recent SCA workflow runs found');
+                  }
+                } catch (searchError) {
+                  console.log(`  Could not search for recent runs: ${searchError.message}`);
+                }
               }
               core.setOutput('success', 'false');
               return;
