@@ -39,7 +39,38 @@ jobs:
         echo "artifact-name=$ARTIFACT_NAME" >> $GITHUB_OUTPUT
         echo "Attempting to download artifact with name: $ARTIFACT_NAME"
 
+    - name: List available artifacts in the workflow run
+      id: list-artifacts
+      continue-on-error: true
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ github.event.client_payload.token }}
+        script: |
+          const artifacts = await github.rest.actions.listArtifactsForRepo({
+            owner: '${{ github.event.client_payload.repository.owner }}',
+            repo: '${{ github.event.client_payload.repository.name }}',
+            per_page: 50
+          });
+          console.log('Available artifacts:');
+          artifacts.data.artifacts.forEach(artifact => {
+            console.log(`- ${artifact.name} (ID: ${artifact.id}, expires: ${artifact.expires_at})`);
+          });
+
+          const matchingArtifact = artifacts.data.artifacts.find(a =>
+            a.name === 'sca-scan-results-${{ github.event.client_payload.workflow_run_id }}'
+          );
+
+          if (matchingArtifact) {
+            core.setOutput('artifact-exists', 'true');
+            core.setOutput('artifact-id', matchingArtifact.id);
+            console.log(`Found matching artifact: ${matchingArtifact.name}`);
+          } else {
+            core.setOutput('artifact-exists', 'false');
+            console.log('Matching artifact not found');
+          }
+
     - name: Download SCA scan artifact
+      if: steps.list-artifacts.outputs.artifact-exists == 'true'
       continue-on-error: true
       uses: actions/download-artifact@v4
       with:
@@ -127,6 +158,12 @@ jobs:
         if [ -d "./veracode_artifact_directory/.srcclr" ] || [ -d "./veracode_artifact_directory/.veracode" ]; then
           echo "Found SCA output directories"
           has_results="true"
+        fi
+
+        # Check for empty marker (no SCA results)
+        if [ -f "./veracode_artifact_directory/sca-status.json" ]; then
+          echo "Found SCA status marker (likely no results)"
+          has_results="false"
         fi
 
         if [ "$has_results" = "false" ]; then

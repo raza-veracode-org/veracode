@@ -180,12 +180,20 @@ jobs:
           pr_number: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.pr_number || github.event.pull_request.number }}
 
       - name: Check for SCA output files
+        id: check-sca-files
         run: |
           echo "Checking for SCA output files..."
           find . -type f -name "*.json" -o -name "SBOM*" -o -type d -name ".srcclr" -o -type d -name ".veracode" 2>/dev/null | head -20
 
+          # Check if any SCA results exist
+          if find . -name "scaResults.json" -o -name "SBOM.json" -o -name "sbom.json" -o -name ".srcclr" -o -name ".veracode" 2>/dev/null | grep -q .; then
+            echo "found-results=true" >> $GITHUB_OUTPUT
+          else
+            echo "found-results=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Upload SCA scan results
-        if: always()
+        if: always() && steps.check-sca-files.outputs.found-results == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: sca-scan-results-${{ github.run_id }}
@@ -196,4 +204,18 @@ jobs:
             SBOM.json
           retention-days: 1
           if-no-files-found: ignore
+
+      - name: Create empty SCA results marker if no results found
+        if: always() && steps.check-sca-files.outputs.found-results != 'true'
+        run: |
+          mkdir -p ./empty-sca-marker
+          echo '{"scan_status":"no_results","run_id":"${{ github.run_id }}"}' > ./empty-sca-marker/sca-status.json
+
+      - name: Upload empty SCA marker artifact
+        if: always() && steps.check-sca-files.outputs.found-results != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sca-scan-results-${{ github.run_id }}
+          path: ./empty-sca-marker/
+          retention-days: 1
 
