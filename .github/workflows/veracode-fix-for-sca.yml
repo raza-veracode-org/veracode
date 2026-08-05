@@ -32,89 +32,105 @@ jobs:
     - name: Create artifact directory
       run: mkdir -p ./veracode_artifact_directory
 
-    - name: Build artifact names to search for
-      id: build-artifact-name
-      run: |
-        PRIMARY_ARTIFACT="sca-scan-results-${{ github.event.client_payload.workflow_run_id }}"
-        FALLBACK_ARTIFACT="sca-scan-results"
-        echo "primary-artifact=$PRIMARY_ARTIFACT" >> $GITHUB_OUTPUT
-        echo "fallback-artifact=$FALLBACK_ARTIFACT" >> $GITHUB_OUTPUT
-        echo "Primary artifact name: $PRIMARY_ARTIFACT"
-        echo "Fallback artifact name: $FALLBACK_ARTIFACT"
-
-    - name: List available artifacts in the workflow run
-      id: list-artifacts
-      continue-on-error: true
+    - name: Download SCA scan artifact from source repository
+      id: download-artifact
       uses: actions/github-script@v7
       with:
         github-token: ${{ github.event.client_payload.token }}
         script: |
+          const fs = require('fs');
+          const path = require('path');
+          const zlib = require('zlib');
+          const owner = '${{ github.event.client_payload.repository.owner }}';
+          const repo = '${{ github.event.client_payload.repository.name }}';
+          const runId = ${{ github.event.client_payload.workflow_run_id }};
+          const artifactDir = './veracode_artifact_directory';
+
+          console.log(`\n📦 Downloading SCA artifacts from ${owner}/${repo} run ${runId}\n`);
+
           try {
-            console.log('Querying workflow run: ${{ github.event.client_payload.workflow_run_id }}');
-            const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
-              owner: '${{ github.event.client_payload.repository.owner }}',
-              repo: '${{ github.event.client_payload.repository.name }}',
-              run_id: ${{ github.event.client_payload.workflow_run_id }},
+            // List artifacts for this run
+            const listResponse = await github.rest.actions.listWorkflowRunArtifacts({
+              owner,
+              repo,
+              run_id: runId,
               per_page: 50
             });
-            console.log('Available artifacts in workflow run:');
-            if (artifacts.data.artifacts && artifacts.data.artifacts.length > 0) {
-              artifacts.data.artifacts.forEach(artifact => {
-                console.log(`- ${artifact.name} (ID: ${artifact.id}, size: ${artifact.size_in_bytes}, expires: ${artifact.expires_at})`);
-              });
-            } else {
-              console.log('No artifacts found in this workflow run');
+
+            console.log('Available artifacts:');
+            if (!listResponse.data.artifacts || listResponse.data.artifacts.length === 0) {
+              console.log('❌ No artifacts found in this workflow run');
+              core.setOutput('success', 'false');
+              return;
             }
 
-            // Try to find artifact with exact name first
-            let matchingArtifact = artifacts.data.artifacts && artifacts.data.artifacts.find(a =>
-              a.name === 'sca-scan-results-${{ github.event.client_payload.workflow_run_id }}'
+            listResponse.data.artifacts.forEach(artifact => {
+              console.log(`  - ${artifact.name} (ID: ${artifact.id})`);
+            });
+
+            // Find SCA results artifact
+            const scaArtifact = listResponse.data.artifacts.find(a =>
+              a.name && a.name.includes('sca-scan-results')
             );
 
-            // If not found, look for any sca-scan artifact
-            if (!matchingArtifact && artifacts.data.artifacts) {
-              matchingArtifact = artifacts.data.artifacts.find(a =>
-                a.name && a.name.includes('sca-scan-results')
-              );
-              if (matchingArtifact) {
-                console.log(`⚠ Found alternative artifact: ${matchingArtifact.name}`);
+            if (!scaArtifact) {
+              console.log('\n❌ No SCA scan results artifact found');
+              core.setOutput('success', 'false');
+              return;
+            }
+
+            console.log(`\n✅ Found SCA artifact: ${scaArtifact.name}`);
+
+            // Download the artifact as zip
+            console.log(`\n⏳ Downloading artifact ${scaArtifact.id}...`);
+            const downloadResponse = await github.rest.actions.downloadArtifact({
+              owner,
+              repo,
+              artifact_id: scaArtifact.id,
+              archive_format: 'zip'
+            });
+
+            // Create directory if it doesn't exist
+            fs.mkdirSync(artifactDir, { recursive: true });
+
+            // Write the zip file
+            const zipPath = path.join(artifactDir, 'artifact.zip');
+            fs.writeFileSync(zipPath, Buffer.from(downloadResponse.data));
+            console.log(`✅ Zip file saved to ${zipPath}`);
+
+            // Extract the zip file
+            const AdmZip = require('adm-zip');
+            const zip = new AdmZip(zipPath);
+            zip.extractAllTo(artifactDir, true);
+            console.log(`✅ Artifact extracted to ${artifactDir}`);
+
+            // List extracted contents
+            console.log('\nExtracted files:');
+            const listDir = (dir, prefix = '') => {
+              try {
+                const files = fs.readdirSync(dir);
+                files.forEach(file => {
+                  const filePath = path.join(dir, file);
+                  const stat = fs.statSync(filePath);
+                  console.log(`  ${prefix}${file}${stat.isDirectory() ? '/' : ''}`);
+                  if (stat.isDirectory() && prefix.length < 4) {
+                    listDir(filePath, prefix + '  ');
+                  }
+                });
+              } catch (e) {
+                console.log(`  ${prefix}[error reading directory]`);
               }
-            }
+            };
+            listDir(artifactDir);
 
-            if (matchingArtifact) {
-              core.setOutput('artifact-exists', 'true');
-              core.setOutput('artifact-id', matchingArtifact.id);
-              core.setOutput('artifact-name', matchingArtifact.name);
-              console.log(`✓ Found matching artifact: ${matchingArtifact.name}`);
-            } else {
-              core.setOutput('artifact-exists', 'false');
-              core.setOutput('artifact-name', '');
-              console.log('✗ Matching artifact not found. Expected: sca-scan-results-${{ github.event.client_payload.workflow_run_id }} or similar');
-            }
+            console.log('\n✅ Artifact download and extraction complete');
+            core.setOutput('success', 'true');
+            core.setOutput('artifact-name', scaArtifact.name);
+
           } catch (error) {
-            console.log('Error querying artifacts:', error.message);
-            core.setOutput('artifact-exists', 'false');
+            console.log(`\n❌ Error: ${error.message}`);
+            core.setOutput('success', 'false');
           }
-
-    - name: Download SCA scan artifact
-      continue-on-error: true
-      uses: actions/download-artifact@v4
-      with:
-        github-token: ${{ github.event.client_payload.token }}
-        run-id: ${{ github.event.client_payload.workflow_run_id }}
-        name: ${{ steps.list-artifacts.outputs.artifact-name || steps.build-artifact-name.outputs.primary-artifact }}
-        path: ./veracode_artifact_directory
-
-    - name: Verify artifact download
-      run: |
-        echo "Checking if artifact was downloaded..."
-        if [ -d "./veracode_artifact_directory" ] && [ "$(ls -A ./veracode_artifact_directory)" ]; then
-          echo "✓ Artifact directory has content"
-          ls -la ./veracode_artifact_directory
-        else
-          echo "✗ Artifact directory is empty or does not exist"
-          ls -la ./veracode_artifact_directory 2>/dev/null || echo "Directory does not exist"
-        fi
 
     - name: Check out to get veracode CLI
       uses: actions/checkout@v4
@@ -163,52 +179,43 @@ jobs:
         token: ${{ github.event.client_payload.token }}
         path: 'source-code'
 
-    - name: Debug - Show artifact info and check for SCA results files
-      run: |
-        echo "workflow_run_id: ${{ github.event.client_payload.workflow_run_id }}"
-        echo "artifact_name: ${{ steps.build-artifact-name.outputs.artifact-name }}"
-        echo ""
-        echo "Checking for SCA results files in veracode_artifact_directory..."
-        find ./veracode_artifact_directory -type f 2>/dev/null | head -20
-        echo ""
-        echo "Checking for SCA results in source code directory..."
-        find ./source-code -type f -name "*scaResults*" -o -name "SBOM*" -o -name ".srcclr" 2>/dev/null | head -20
-
     - name: Check if SCA results exist
       id: check-sca-results
       run: |
         has_results="false"
 
-        echo "Checking artifact contents for actual SCA results..."
-        ls -la ./veracode_artifact_directory/
+        echo "📋 Checking artifact contents for actual SCA results..."
+        echo ""
+        ls -la ./veracode_artifact_directory/ 2>/dev/null || echo "Artifact directory not found"
+        echo ""
 
         # Look for actual SCA result files (not just metadata)
         if [ -d "./veracode_artifact_directory/.srcclr" ]; then
           if [ -n "$(find ./veracode_artifact_directory/.srcclr -type f 2>/dev/null)" ]; then
-            echo "✓ Found .srcclr directory with files"
+            echo "✅ Found .srcclr directory with files"
             has_results="true"
           fi
         fi
 
         if [ -d "./veracode_artifact_directory/.veracode" ]; then
           if [ -n "$(find ./veracode_artifact_directory/.veracode -type f 2>/dev/null)" ]; then
-            echo "✓ Found .veracode directory with files"
+            echo "✅ Found .veracode directory with files"
             has_results="true"
           fi
         fi
 
         if [ -f "./veracode_artifact_directory/scaResults.json" ]; then
-          echo "✓ Found scaResults.json"
+          echo "✅ Found scaResults.json"
           has_results="true"
         fi
 
         if [ -f "./veracode_artifact_directory/SBOM.json" ] || [ -f "./veracode_artifact_directory/sbom.json" ]; then
-          echo "✓ Found SBOM file"
+          echo "✅ Found SBOM file"
           has_results="true"
         fi
 
         if [ "$has_results" = "false" ]; then
-          echo "✗ No SCA result files found in artifact"
+          echo "⚠️  No SCA result files found in artifact"
           echo "Artifact contains only metadata (scan may have completed with no findings)"
         fi
 
@@ -225,7 +232,7 @@ jobs:
         github-token: ${{ github.event.client_payload.token }}
         pr-number: ${{ github.event.client_payload.issue_number }}
         sca-scan-run-id: ${{ github.event.client_payload.workflow_run_id }}
-        sca-scan-artifact-id: ${{ steps.build-artifact-name.outputs.artifact-name }}
+        sca-scan-artifact-id: ${{ steps.download-artifact.outputs.artifact-name }}
         repository: ${{ github.event.client_payload.repository.full_name }}
         branch: ${{ github.event.client_payload.repository.branch }}
         fix-sca-params: ${{ github.event.client_payload.fix_sca_params || '' }}
@@ -234,14 +241,10 @@ jobs:
     - name: Info - Fix for SCA skipped - no SCA results available
       if: steps.check-sca-results.outputs.has_results != 'true'
       run: |
-        echo "Fix for SCA action was skipped because no SCA scan results were found."
+        echo "ℹ️  Fix for SCA action was skipped because no SCA scan results were found."
         echo "The Fix for SCA workflow requires pre-existing SCA scan results to generate fixes."
         echo ""
-        echo "To use this workflow:"
-        echo "1. Ensure SCA scan has completed and produced results"
-        echo "2. Verify the artifact was uploaded with the correct name: sca-scan-results-<run-id>"
-        echo ""
-        echo "Attempted artifact name: ${{ steps.build-artifact-name.outputs.artifact-name }}"
+        echo "Artifact downloaded: ${{ steps.download-artifact.outputs.artifact-name }}"
 
     - name: Download PR comment artifact
       if: steps.check-sca-results.outputs.has_results == 'true' && steps.run-fix-sca.outputs.create-pr-run-next-step == 'true'
