@@ -179,36 +179,37 @@ jobs:
       run: |
         has_results="false"
 
-        # Look for SCA results file in artifact directory
-        if find ./veracode_artifact_directory -name "scaResults.json" 2>/dev/null | grep -q .; then
-          echo "Found scaResults.json in artifact directory"
+        echo "Checking artifact contents for actual SCA results..."
+        ls -la ./veracode_artifact_directory/
+
+        # Look for actual SCA result files (not just metadata)
+        if [ -d "./veracode_artifact_directory/.srcclr" ]; then
+          if [ -n "$(find ./veracode_artifact_directory/.srcclr -type f 2>/dev/null)" ]; then
+            echo "✓ Found .srcclr directory with files"
+            has_results="true"
+          fi
+        fi
+
+        if [ -d "./veracode_artifact_directory/.veracode" ]; then
+          if [ -n "$(find ./veracode_artifact_directory/.veracode -type f 2>/dev/null)" ]; then
+            echo "✓ Found .veracode directory with files"
+            has_results="true"
+          fi
+        fi
+
+        if [ -f "./veracode_artifact_directory/scaResults.json" ]; then
+          echo "✓ Found scaResults.json"
           has_results="true"
         fi
 
-        # Look for SBOM files
-        if find ./veracode_artifact_directory -name "SBOM.json" -o -name "sbom.json" 2>/dev/null | grep -q .; then
-          echo "Found SBOM file in artifact directory"
+        if [ -f "./veracode_artifact_directory/SBOM.json" ] || [ -f "./veracode_artifact_directory/sbom.json" ]; then
+          echo "✓ Found SBOM file"
           has_results="true"
-        fi
-
-        # Look for .srcclr or .veracode directories (SCA output)
-        if [ -d "./veracode_artifact_directory/.srcclr" ] || [ -d "./veracode_artifact_directory/.veracode" ]; then
-          echo "Found SCA output directories"
-          has_results="true"
-        fi
-
-        # Check for empty marker (no SCA results)
-        if [ -f "./veracode_artifact_directory/sca-status.json" ]; then
-          echo "Found SCA status marker (likely no results)"
-          has_results="false"
         fi
 
         if [ "$has_results" = "false" ]; then
-          echo "WARNING: No SCA results found in artifact directory - checking source code..."
-          if find ./source-code -name "scaResults.json" 2>/dev/null | grep -q .; then
-            echo "Found scaResults.json in source code directory"
-            has_results="true"
-          fi
+          echo "✗ No SCA result files found in artifact"
+          echo "Artifact contains only metadata (scan may have completed with no findings)"
         fi
 
         echo "has_results=$has_results" >> $GITHUB_OUTPUT

@@ -183,39 +183,67 @@ jobs:
         id: check-sca-files
         run: |
           echo "Checking for SCA output files..."
-          find . -type f -name "*.json" -o -name "SBOM*" -o -type d -name ".srcclr" -o -type d -name ".veracode" 2>/dev/null | head -20
+          echo "Looking for SCA result files and directories..."
 
-          # Check if any SCA results exist
-          if find . -name "scaResults.json" -o -name "SBOM.json" -o -name "sbom.json" -o -name ".srcclr" -o -name ".veracode" 2>/dev/null | grep -q .; then
-            echo "found-results=true" >> $GITHUB_OUTPUT
-          else
-            echo "found-results=false" >> $GITHUB_OUTPUT
+          found_results="false"
+
+          # Check for scaResults.json
+          if find . -maxdepth 5 -name "scaResults.json" 2>/dev/null | grep -q .; then
+            echo "✓ Found scaResults.json"
+            found_results="true"
           fi
 
-      - name: Upload SCA scan results
-        if: always() && steps.check-sca-files.outputs.found-results == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: sca-scan-results-${{ github.run_id }}
-          path: |
-            .srcclr/
-            .veracode/
-            sbom.json
-            SBOM.json
-          retention-days: 1
-          if-no-files-found: ignore
+          # Check for SBOM files
+          if find . -maxdepth 5 -name "SBOM.json" -o -name "sbom.json" 2>/dev/null | grep -q .; then
+            echo "✓ Found SBOM file"
+            found_results="true"
+          fi
 
-      - name: Create empty SCA results marker if no results found
-        if: always() && steps.check-sca-files.outputs.found-results != 'true'
+          # Check for .srcclr directory
+          if [ -d ".srcclr" ]; then
+            echo "✓ Found .srcclr directory"
+            found_results="true"
+            ls -la .srcclr | head -10
+          fi
+
+          # Check for .veracode directory
+          if [ -d ".veracode" ]; then
+            echo "✓ Found .veracode directory"
+            found_results="true"
+            ls -la .veracode | head -10
+          fi
+
+          echo "found-results=$found_results" >> $GITHUB_OUTPUT
+          echo "SCA results found: $found_results"
+
+      - name: Create SCA results directory
         run: |
-          mkdir -p ./empty-sca-marker
-          echo '{"scan_status":"no_results","run_id":"${{ github.run_id }}"}' > ./empty-sca-marker/sca-status.json
+          mkdir -p ./sca-results-archive
 
-      - name: Upload empty SCA marker artifact
-        if: always() && steps.check-sca-files.outputs.found-results != 'true'
+          # Copy SCA results if they exist
+          [ -d ".srcclr" ] && cp -r .srcclr ./sca-results-archive/ || true
+          [ -d ".veracode" ] && cp -r .veracode ./sca-results-archive/ || true
+          [ -f "sbom.json" ] && cp sbom.json ./sca-results-archive/ || true
+          [ -f "SBOM.json" ] && cp SBOM.json ./sca-results-archive/ || true
+          [ -f "scaResults.json" ] && cp scaResults.json ./sca-results-archive/ || true
+
+      - name: Create metadata file
+        run: |
+          cat > ./sca-results-archive/scan-metadata.json <<EOF
+          {
+            "run_id": "${{ github.run_id }}",
+            "workflow_name": "${{ github.workflow }}",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "event": "${{ github.event_name }}",
+            "branch": "${{ github.ref_name }}"
+          }
+          EOF
+
+      - name: Upload SCA scan results artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sca-scan-results-${{ github.run_id }}
-          path: ./empty-sca-marker/
+          path: ./sca-results-archive/
           retention-days: 1
 
