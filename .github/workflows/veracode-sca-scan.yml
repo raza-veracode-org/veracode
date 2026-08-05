@@ -40,7 +40,8 @@ jobs:
       default_runs_on: ${{ github.event.client_payload.user_config.default_runs_on }}
 
   veracode-sca-scan:
-    needs: ${{ github.event_name == 'repository_dispatch' && fromJson('["register"]') || fromJson('[]') }}
+    needs: [register]
+    if: always()
     runs-on: ${{ github.event_name == 'repository_dispatch' && fromJson(github.event.client_payload.user_config.default_runs_on) || 'ubuntu-latest' }}
     name: Veracode Component Analysis
     timeout-minutes: 30
